@@ -18,20 +18,22 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/kernels/index_ops.h"
 
 #include "tensorflow/compiler/tf2xla/type_util.h"
-#include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/lib/arithmetic.h"
+#include "tensorflow/compiler/xla/shape_util.h"
+#include "tensorflow/core/framework/bounds_check.h"
 #include "tensorflow/core/framework/kernel_def_builder.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_shape.h"
-#include "tensorflow/core/kernels/bounds_check.h"
 
 namespace tensorflow {
 XlaArgMinMaxOp::XlaArgMinMaxOp(OpKernelConstruction* ctx, bool is_min)
-    : XlaOpKernel(ctx), is_min_(is_min) {}
+    : XlaOpKernel(ctx),
+      is_min_(is_min),
+      is_gpu_(ctx->device_type().type_string() == DEVICE_GPU_XLA_JIT) {}
 
 void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
   const TensorShape input_shape = ctx->InputShape(0);
@@ -59,53 +61,34 @@ void XlaArgMinMaxOp::Compile(XlaOpKernelContext* ctx) {
                               input_shape.DebugString()));
 
   DataType index_type = output_type(0);
-  xla::PrimitiveType xla_input_type;
-  OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(input_type(0), &xla_input_type));
-  xla::PrimitiveType xla_index_type;
-  OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(index_type, &xla_index_type));
+  xla::PrimitiveType index_xla_type;
+  OP_REQUIRES_OK(ctx, DataTypeToPrimitiveType(index_type, &index_xla_type));
 
-  xla::ComputationBuilder* b = ctx->builder();
-  xla::ComputationDataHandle input = ctx->Input(0);
-
-  xla::ComputationDataHandle init_value;
-  const xla::Computation* reducer;
+  xla::XlaOp input = ctx->Input(0);
+  xla::XlaOp output;
+  // One pass ArgMin/ArgMax is slow on GPUs.
   if (is_min_) {
-    init_value = XlaHelpers::MaxValue(b, input_type(0));
-    reducer = ctx->GetOrCreateMin(input_type(0));
+    if (is_gpu_) {
+      output = xla::ArgMinTwoPass(input, index_xla_type, axis);
+    } else {
+      output = xla::ArgMin(input, index_xla_type, axis);
+    }
   } else {
-    init_value = XlaHelpers::MinValue(b, input_type(0));
-    reducer = ctx->GetOrCreateMax(input_type(0));
+    if (is_gpu_) {
+      output = xla::ArgMaxTwoPass(input, index_xla_type, axis);
+    } else {
+      output = xla::ArgMax(input, index_xla_type, axis);
+    }
   }
-  xla::ComputationDataHandle input_max =
-      b->Reduce(input, init_value, *reducer, /*dimensions_to_reduce=*/{axis});
-  std::vector<int64> broadcast_dims(input_dims - 1);
-  std::iota(broadcast_dims.begin(), broadcast_dims.begin() + axis, 0);
-  std::iota(broadcast_dims.begin() + axis, broadcast_dims.end(), axis + 1);
-  // Compute a mask that has 1s for elements equal to the maximum.
-  xla::ComputationDataHandle mask = b->ConvertElementType(
-      b->Eq(input, input_max, broadcast_dims), xla_index_type);
-
-  // Multiply by the vector [0, 1, 2, ...] to convert each 1 into its index.
-  // TODO(phawkins): add a bitwise And operator to HLO, use a bitwise and
-  // instead of a multiplication here.
-  xla::ComputationDataHandle iota;
-  OP_REQUIRES_OK(ctx, XlaHelpers::Iota(b, index_type, axis_size, &iota));
-  xla::ComputationDataHandle product =
-      b->Mul(mask, iota, /*broadcast_dimensions=*/{axis});
-
-  // If there are multiple maximum elements, choose the one with the highest
-  // index.
-  xla::ComputationDataHandle output =
-      b->Reduce(product, XlaHelpers::MinValue(b, index_type),
-                *ctx->GetOrCreateMax(index_type),
-                /*dimensions_to_reduce=*/{axis});
 
   ctx->SetOutput(0, output);
 }
 
 XlaArgMaxOp::XlaArgMaxOp(OpKernelConstruction* ctx)
     : XlaArgMinMaxOp(ctx, /*is_min=*/false) {}
-REGISTER_XLA_OP(Name("ArgMax").Device(DEVICE_GPU_XLA_JIT), XlaArgMaxOp);
+REGISTER_XLA_OP(Name("ArgMax")
+                    .CompileTimeConstantInput("dimension"),
+                XlaArgMaxOp);
 
 namespace {
 
@@ -115,7 +98,8 @@ class XlaArgMinOp : public XlaArgMinMaxOp {
 };
 XlaArgMinOp::XlaArgMinOp(OpKernelConstruction* ctx)
     : XlaArgMinMaxOp(ctx, /*is_min=*/true) {}
-REGISTER_XLA_OP(Name("ArgMin"), XlaArgMinOp);
+REGISTER_XLA_OP(Name("ArgMin").CompileTimeConstantInput("dimension"),
+                XlaArgMinOp);
 
 }  // namespace
 }  // namespace tensorflow

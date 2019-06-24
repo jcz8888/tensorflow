@@ -265,16 +265,22 @@ def bucket(tensors,
         for i, (q, bs) in enumerate(zip(bucket_queues, batch_size))
     ]
 
-    for i, q in enumerate(bucket_queues):
-      queue_runner.add_queue_runner(
-          queue_runner.QueueRunner(
-              q, [enqueues_to_top[i]],
-              queue_closed_exception_types=(errors.OutOfRangeError,
-                                            errors.CancelledError)))
+    queue_runner.add_queue_runner(
+        queue_runner.QueueRunner(
+            bucket_queues[0], enqueues_to_top,
+            close_op=top_queue.close(),
+            cancel_op=top_queue.close(cancel_pending_enqueues=True),
+            queue_closed_exception_types=(errors.OutOfRangeError,
+                                          errors.CancelledError)))
     queue_runner.add_queue_runner(
         queue_runner.QueueRunner(
             top_queue,
             bucket_enqueue_ops,
+            close_op=control_flow_ops.group(
+                *[q.close() for q in bucket_queues]),
+            cancel_op=control_flow_ops.group(
+                *[q.close(cancel_pending_enqueues=True)
+                  for q in bucket_queues]),
             queue_closed_exception_types=(errors.OutOfRangeError,
                                           errors.CancelledError)))
 
@@ -394,7 +400,7 @@ def bucket_by_sequence_length(input_length,
         math_ops.less_equal(buckets_min, input_length),
         math_ops.less(input_length, buckets_max))
     which_bucket = math_ops.reduce_min(array_ops.where(conditions_c))
-    which_bucket = math_ops.to_int32(which_bucket)
+    which_bucket = math_ops.cast(which_bucket, dtypes.int32)
 
     if shapes is not None:
       shapes = [tensor_shape.scalar()] + shapes

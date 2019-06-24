@@ -24,7 +24,7 @@ natively on your system.
 
 ### Run TensorFlow CI Scripts Natively on your Machine
 
-1.  Follow the instructions at https://www.tensorflow.org/install/install_sources,
+1.  Follow the instructions at https://www.tensorflow.org/install/source,
     but stop when you get to the section "Configure the installation". You do not
     need to configure the installation to run the CI scripts.
 
@@ -67,10 +67,10 @@ this UI, to see the logs for a failed build:
     the build tool divided the target into multiple shards or ran the test
     multiple times. Each test log is specific to the shard, run, and attempt.
     To see a specific log:
-    
+
     1.  Click on the log icon that is on the right next to the shard, run,
         and attempt number.
-        
+
     2.  In the grid that appears on the right, click on the specific shard,
         run, and attempt to view its log. You can also type the desired shard,
         run, or attempt number in the field above its grid.

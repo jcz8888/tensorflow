@@ -13,15 +13,27 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TENSORFLOW_KERNELS_FUSED_BATCH_NORM_OP_H_
-#define TENSORFLOW_KERNELS_FUSED_BATCH_NORM_OP_H_
+#ifndef TENSORFLOW_CORE_KERNELS_FUSED_BATCH_NORM_OP_H_
+#define TENSORFLOW_CORE_KERNELS_FUSED_BATCH_NORM_OP_H_
 
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
+#include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/tensor.h"
 #include "tensorflow/core/framework/tensor_types.h"
+#include "tensorflow/core/util/tensor_format.h"
 
 namespace tensorflow {
 namespace functor {
+
+// FusedBatchNormEx op supports side inputs and activations:
+//   (1) batch_norm + activation
+//   (2) batch norm + side input + activation
+enum class FusedBatchNormActivationMode { kIdentity, kRelu };
+
+string ToString(FusedBatchNormActivationMode activation_mode);
+
+Status ParseActivationMode(OpKernelConstruction* context,
+                           FusedBatchNormActivationMode* activation_mode);
 
 #if GOOGLE_CUDA
 
@@ -47,6 +59,27 @@ template <class T>
 struct InvVarianceToVariance {
   void operator()(const Eigen::GpuDevice& d, double epsilon, int sample_size,
                   int channels, T* variance);
+};
+
+// This function sets a GPU tensor to NaNs.
+template <class T>
+struct SetNanFunctor {
+  void operator()(const Eigen::GpuDevice& d, typename TTypes<T>::Flat out);
+};
+
+// This is a functor to launch custom CUDA kernel for FusedBatchNorm with side
+// input and activation when 'is_training=False'. In training we rely on cuDNN.
+template <typename Device, typename T, typename U>
+struct FusedBatchNormInferenceFunctor {
+  void operator()(OpKernelContext* context, TensorFormat tensor_format,
+                  typename TTypes<T, 4>::ConstTensor in,
+                  typename TTypes<U>::ConstVec scale,
+                  typename TTypes<U>::ConstVec offset,
+                  typename TTypes<U>::ConstVec estimated_mean,
+                  typename TTypes<U>::ConstVec estimated_variance,
+                  typename TTypes<T, 4>::ConstTensor side_input, U epsilon,
+                  FusedBatchNormActivationMode activation_mode,
+                  typename TTypes<T, 4>::Tensor out);
 };
 
 #endif  // GOOGLE_CUDA
@@ -92,26 +125,28 @@ struct FusedBatchNormFreezeGrad {
     // offset_backprop  = sum(y_backprop)
     // scale_backprop = y_backprop * ((x - pop_mean) * rsqrt(pop_var + epsilon))
     // x_backprop = y_backprop * (scale * rsqrt(pop_var + epsilon))
-    offset_backprop.device(d) = y_backprop.reshape(rest_by_depth)
-                                    .template cast<U>()
-                                    .sum(reduction_axis);
+
+    auto y_backprop_rest_by_depth =
+        y_backprop.reshape(rest_by_depth).template cast<U>();
+    auto input_rest_by_depth = input.reshape(rest_by_depth).template cast<U>();
+
+    offset_backprop.device(d) = y_backprop_rest_by_depth.sum(reduction_axis);
 
     // scratch1 = rsqrt(pop_var + epsilon)
     scratch1.device(d) = (pop_var + pop_var.constant(epsilon)).rsqrt();
 
     // scratch2 = sum(y_backprop * (x - mean))
     scratch2.device(d) =
-        (y_backprop.reshape(rest_by_depth).template cast<U>() *
-         (input.reshape(rest_by_depth).template cast<U>() -
+        (y_backprop_rest_by_depth *
+         (input_rest_by_depth -
           pop_mean.reshape(one_by_depth).broadcast(rest_by_one)))
             .sum(reduction_axis);
 
     x_backprop.reshape(rest_by_depth).device(d) =
-        (y_backprop.reshape(rest_by_depth).template cast<U>() *
-         ((scratch1 * scale)
-              .eval()
-              .reshape(one_by_depth)
-              .broadcast(rest_by_one)))
+        (y_backprop_rest_by_depth * ((scratch1 * scale)
+                                         .eval()
+                                         .reshape(one_by_depth)
+                                         .broadcast(rest_by_one)))
             .template cast<T>();
     scale_backprop.device(d) = scratch2 * scratch1;
   }
@@ -120,4 +155,4 @@ struct FusedBatchNormFreezeGrad {
 }  // namespace functor
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_KERNELS_FUSED_BATCH_NORM_OP_H_
+#endif  // TENSORFLOW_CORE_KERNELS_FUSED_BATCH_NORM_OP_H_

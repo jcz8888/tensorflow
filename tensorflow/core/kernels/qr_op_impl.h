@@ -13,6 +13,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#ifndef TENSORFLOW_CORE_KERNELS_QR_OP_IMPL_H_
+#define TENSORFLOW_CORE_KERNELS_QR_OP_IMPL_H_
+
 // See docs in ../ops/linalg_ops.cc.
 //
 // This header file is used by the individual qr_*op*.cc files for registering
@@ -40,6 +43,7 @@ limitations under the License.
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/kernels/cuda_solvers.h"
 #include "tensorflow/core/kernels/cwise_ops.h"
+#include "tensorflow/core/kernels/eye_functor.h"
 #include "tensorflow/core/kernels/matrix_band_part_op.h"
 #include "tensorflow/core/kernels/transpose_functor.h"
 #endif
@@ -291,6 +295,8 @@ class QrOpGpu : public AsyncOpKernel {
   TF_DISALLOW_COPY_AND_ASSIGN(QrOpGpu);
 };
 
-#endif
+#endif  // GOOGLE_CUDA
 
 }  // namespace tensorflow
+
+#endif  // TENSORFLOW_CORE_KERNELS_QR_OP_IMPL_H_
